@@ -40,7 +40,7 @@ export class GitObjectManager {
         if (p.offsets.has(oid)) {
           // Get the resolved git object from the packfile
           if (!p.pack) {
-            p.pack = fs.read(packFile)
+            p.pack = fs.open(packFile)
           }
           let result = await p.read({ oid, getExternalRefDelta })
           result.source = `./objects/pack/${filename}`

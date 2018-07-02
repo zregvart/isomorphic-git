@@ -23,6 +23,38 @@ export class FileSystem {
     this._stat = pify(fs.stat.bind(fs))
     this._lstat = pify(fs.lstat.bind(fs))
     this._readdir = pify(fs.readdir.bind(fs))
+    this._open = pify(fs.open.bind(fs))
+    this._fstat = pify(fs.fstat.bind(fs))
+    this._read = pify(fs.read.bind(fs))
+    this._close = pify(fs.close.bind(fs))
+  }
+  /**
+   * Return an object that can be used to efficiently read random access slices from a file.
+   */
+  async open (filepath) {
+    const mode = 'r'
+    const fd = await this._open(filepath, mode)
+    const stats = await this._fstat(fd)
+    const close = async () => this._close(fd)
+    const slice = async (start, end) => {
+      if (end === undefined) {
+        end = stats.size
+      }
+      if (end < 0) {
+        end += stats.size
+      }
+      if (start < 0) {
+        start += stats.size
+      }
+      let buffer = Buffer.allocUnsafe(end - start)
+      let bytesRead = await this._read(fd, buffer, 0, end - start, start)
+      if (bytesRead !== end - start) throw new Error('File read slice length assertion failed')
+      return buffer
+    }
+    return {
+      close,
+      slice
+    }
   }
   /**
    * Return true if a file exists, false if it doesn't exist.
