@@ -4,11 +4,14 @@ import { GitIndexManager } from '../managers/GitIndexManager.js'
 import { GitRefManager } from '../managers/GitRefManager.js'
 import { FileSystem } from '../models/FileSystem.js'
 import { E, GitError } from '../models/GitError.js'
-import { WORKDIR } from '../models/GitWalkerFs.js'
+import { WORKDIR } from '../models/GitWalkerIndex.js'
+import { STAGE } from '../models/GitWalkerRepo.js'
 import { TREE } from '../models/GitWalkerRepo.js'
+import { readObject } from '../storage/readObject'
 import { cores } from '../utils/plugins.js'
 
 import { config } from './config'
+import { currentBranch } from './currentBranch.js'
 import { walkBeta1 } from './walkBeta1.js'
 
 /**
@@ -65,10 +68,165 @@ export async function checkout ({
     }
     let fullRef = await GitRefManager.expand({ fs, gitdir, ref })
 
+    let currentRef = await currentBranch({ dir, gitdir, fs, fullname: true })
+
+    // Note: at some point we'll get to re-use this algorithm for computing merges!
+    // Figure out what we need to do.
+    let operations = []
+    let errors = []
+    await walkBeta1({
+      fs,
+      dir,
+      gitdir,
+      trees: [
+        WORKDIR({ fs, dir, gitdir }),
+        STAGE({ fs, gitdir }),
+        TREE({ fs, gitdir, ref: currentRef }),
+        TREE({ fs, gitdir, ref }),
+      ],
+      map: async function ([workdir, stage, head, next]) {
+        if (workdir.fullpath === '.') return
+        // Case: file is untracked
+        if (!head.exists && !next.exists) {
+          // Do nothing
+          return
+        }
+        await next.populateStat()
+        // For now, just ignore directories
+        // TODO: Handle all the edge cases with directories becoming files and vice versa
+        if (next.type === 'tree') return
+        // For now, just skip over submodules
+        if (next.type === 'commit') {
+          // gitlinks
+          console.log(
+            new GitError(E.NotImplementedFail, { thing: 'submodule support' })
+          )
+          return
+        }
+        // Case: file got deleted
+        if (head.exists && !next.exists) {
+          // If we also deleted it, no change is necessary.
+          if (!workdir.exists) {
+            // Do nothing
+          } else {
+            // Otherwise, make sure it is safe to delete the file
+            await workdir.populateHash()
+            await head.populateHash()
+            if (workdir.oid === head.oid) {
+              operations.push({
+                op: 'unlink',
+                filepath: workdir.fullpath
+              })
+            } else {
+              errors.push(new GitError(E.InternalFail, {
+                message: `Your file ${workdir.fullpath} has local changes but has been deleted in ${ref}. Commit or stash your changes before checking out ${ref}.`
+              })
+            }
+          }
+          return
+        }
+        // Case: file got added
+        if (!head.exists && next.exists) {
+          // If it's not present in the working directory, we can safely add it
+          if (!workdir.exists) {
+            await next.populateStat()
+            await next.populateHash()
+            operations.push({
+              op: 'write',
+              filepath: workdir.fullpath,
+              oid: next.oid,
+              mode: next.mode
+            })
+          } else {
+            // We have already added this file... make sure it's identical
+            await workdir.populateHash()
+            await next.populateHash()
+            if (workdir.oid === next.oid) {
+              // Do nothing
+            } else {
+              errors.push(new GitError(E.InternalFail, {
+                message: `You added file ${workdir.fullpath} but a different file with the same name was added in ${ref}. Commit or stash your changes before checking out ${ref}.`
+              })
+            }
+          }
+          return
+        }
+        // Case: file continues to exist
+        if (head.exists && next.exists) {
+          // Did the file change?
+          await head.populateHash()
+          await next.populateHash()
+          if (head.oid === next.oid) {
+            // File didn't change
+            // Do nothing
+          } else {
+            // File got changed
+            await workdir.populateHash()
+            if (workdir.oid === next.oid) {
+              // We've already made the change locally.
+              // Do nothing
+            } else if (workdir.oid === head.oid) {
+              // We haven't modified the file so it is safe to overwrite
+              await next.populateStat()
+              operations.push({
+                op: 'write',
+                filepath: workdir.fullpath,
+                oid: next.oid,
+                mode: next.mode
+              })
+            } else {
+              errors.push(new GitError(E.InternalFail, {
+                message: `Your file ${workdir.fullpath} has local changes but has been changed in ${ref}. Commit or stash your changes before checking out ${ref}.`
+              })
+            }
+          }
+          return
+        }
+      }
+    })
+
+    console.log('operations', operations)
+    console.log('errors', errors)
+
+    // Abort if it's not safe
+    if (errors.length > 0) {
+      return errors
+    }
+
+    
+    // Do it.
     // Acquire a lock on the index
     await GitIndexManager.acquire(
       { fs, filepath: `${gitdir}/index` },
       async function (index) {
+        // Do all deletions first, followed by writes
+        for (let op of operations) {
+          if (op.op === 'unlink') {
+            try {
+              await fs.rm(`${dir}/${op.filepath}`)
+            } catch (err) {}
+          }
+        }
+        for (let op of operations) {
+          if (op.op === 'write') {
+            let { type, object } = readObject({ fs, gitdir, oid: op.oid })
+            if (type !== 'blob') {
+              throw new GitError(E.ObjectTypeAssertionInTreeFail, {
+                type,
+                oid: op.oid,
+                entrypath: op.fullpath
+              })
+            }
+            switch (op.mode) {
+              case '100644': {
+                // regular file
+                await fs.write(filepath, object)
+                break
+              }
+              case '---CONTINUE HERE---'
+            }
+          }
+        }
         // TODO: Big optimization possible here.
         // Instead of deleting and rewriting everything, only delete files
         // that are not present in the new branch, and only write files that
