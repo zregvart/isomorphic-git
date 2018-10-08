@@ -17,6 +17,14 @@ const refpaths = ref => [
   `refs/remotes/${ref}`,
   `refs/remotes/${ref}/HEAD`
 ]
+// @see https://git-scm.com/docs/git-rev-parse.html#_specifying_revisions
+const regexs = [
+  new RegExp('refs/remotes/(.*)/HEAD'),
+  new RegExp('refs/remotes/(.*)'),
+  new RegExp('refs/heads/(.*)'),
+  new RegExp('refs/tags/(.*)'),
+  new RegExp('refs/(.*)')
+]
 
 export class GitRefManager {
   static async updateRemoteRefs ({
@@ -153,6 +161,21 @@ export class GitRefManager {
     }
     // Do we give up?
     throw new GitError(E.ExpandRefError, { ref })
+  }
+  static async abbrev ({ fs: _fs, gitdir, ref }) {
+    const fs = new FileSystem(_fs)
+    const fullRef = await GitRefManager.expand({ fs, gitdir, ref })
+    for (const reg of regexs) {
+      let matches = reg.exec(ref)
+      if (matches) {
+        // make sure it's not ambiguous
+        const candidate = matches[1]
+        if (fullRef === await GitRefManager.expand({ fs, gitdir, ref: candidate })) {
+          return candidate
+        }
+      }
+    }
+    return ref
   }
   static async expandAgainstMap ({ fs: _fs, gitdir, ref, map }) {
     // Look in all the proper paths, in this order
