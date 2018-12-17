@@ -261,6 +261,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "zregvart",
+      "name": "Zoran Regvart",
+      "avatar_url": "https://avatars0.githubusercontent.com/u/1306050?v=4",
+      "profile": "https://github.com/zregvart",
+      "contributions": [
+        "code"
+      ]
     }
   ]
 }
